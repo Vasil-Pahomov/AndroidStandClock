@@ -4,6 +4,7 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.os.BatteryManager;
+import android.os.Environment;
 import android.util.Log;
 import android.view.KeyEvent;
 import android.view.View;
@@ -12,12 +13,19 @@ import android.app.Activity;
 import android.content.IntentFilter;
 import android.os.Bundle;
 import android.view.WindowManager;
+import android.widget.FrameLayout;
+
+import java.io.File;
 
 public class MainActivity extends Activity {
 
     private BatteryStatusReceiver batteryReceiver;
 
     private MyView myView;
+
+    private static final String TAG = "MainActivity";
+    private static final String VIDEO_FOLDER = "Download";
+    private VideoBackgroundView videoView;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -62,9 +70,22 @@ public class MainActivity extends Activity {
                         }
                     });
         }
-        myView = new MyView(this);
+// Create a FrameLayout to hold both views
+        FrameLayout container = new FrameLayout(this);
 
-        setContentView(myView); // change to myView class
+
+        // Create and add video background view (bottom layer)
+        videoView = new VideoBackgroundView(this);
+        container.addView(videoView);
+
+// Create and add clock view (top layer)
+        myView = new MyView(this);
+        container.addView(myView);
+
+        setContentView(container);
+
+// Load video from external storage
+        loadVideo();
 
         batteryReceiver = new BatteryStatusReceiver();
         IntentFilter filter = new IntentFilter(Intent.ACTION_BATTERY_CHANGED);
@@ -75,6 +96,7 @@ public class MainActivity extends Activity {
         registerReceiver(batteryReceiver, filter);
 
     }
+
 
     @Override
     protected void onDestroy() {
@@ -108,12 +130,69 @@ public class MainActivity extends Activity {
                     status == BatteryManager.BATTERY_STATUS_FULL;
 
             // Update the custom view
-            myView.setBatteryLevel(isCharging ? -1 : batteryLevel);
+            if (myView != null) {
+                myView.setBatteryLevel(isCharging ? -1 : batteryLevel);
 
-            myView.postInvalidate();
+                myView.postInvalidate();
+            }
         }
     }
 
+    private void loadVideo() {
+        File videoDir = null;
+
+        // Try external storage first (sdcard/StandClockVideos/)
+        File externalDir = new File(Environment.getExternalStorageDirectory(), VIDEO_FOLDER);
+        if (externalDir.exists() && externalDir.isDirectory()) {
+            videoDir = externalDir;
+        } else {
+            // Try app-specific external storage
+            File appExternalDir = new File(getExternalFilesDir(null), VIDEO_FOLDER);
+            if (appExternalDir.exists() && appExternalDir.isDirectory()) {
+                videoDir = appExternalDir;
+            }
+        }
+
+        if (videoDir != null) {
+            File[] videoFiles = videoDir.listFiles();
+            if (videoFiles != null && videoFiles.length > 0) {
+                for (File file : videoFiles) {
+                    String name = file.getName().toLowerCase();
+                    if (name.endsWith(".mov") || name.endsWith(".mp4") ||
+                            name.endsWith(".3gp") || name.endsWith(".mkv")) {
+                        String videoPath = file.getAbsolutePath();
+                        Log.d(TAG, "Loading video: " + videoPath);
+                        videoView.setVideoPath(videoPath);
+                        return;
+                    }
+                }
+            }
+        }
+
+        Log.w(TAG, "No video files found. Looking for folder: " + VIDEO_FOLDER);
+    }
+
+    public void changeVideo(String videoPath) {
+        if (videoView != null) {
+            videoView.changeVideo(videoPath);
+        }
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        if (videoView != null) {
+            videoView.pauseVideo();
+        }
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (videoView != null) {
+            videoView.resumeVideo();
+        }
+    }
     private class BatteryStatusReceiver extends BroadcastReceiver {
         @Override
         public void onReceive(Context context, Intent intent) {

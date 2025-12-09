@@ -1,27 +1,18 @@
 package com.lvr.standclock;
 
-import static androidx.core.content.ContextCompat.getSystemService;
-
 import android.content.Context;
-import android.content.Intent;
-import android.content.IntentFilter;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Matrix;
 import android.graphics.Paint;
+import android.graphics.PixelFormat;
+import android.graphics.PorterDuff;
 import android.graphics.Rect;
 import android.graphics.Typeface;
-import android.hardware.Sensor;
-import android.hardware.SensorManager;
-import android.hardware.SensorEventListener;
-import android.hardware.SensorEvent;
-import android.os.BatteryManager;
-import android.os.Handler;
 import android.text.TextPaint;
 import android.util.Log;
-import android.view.MotionEvent;
 import android.view.View;
 
 import java.util.Calendar;
@@ -51,10 +42,9 @@ public class MyView extends View {
             invalidate();
         }
     }
-    private SunriseSunsetCalculation sunCalc  = new SunriseSunsetCalculation(19.457216, 51.759445);
+    private SunriseSunsetCalculation sunCalc = new SunriseSunsetCalculation(19.457216, 51.759445);
 
     // Spider animation variables
-
     private int SPIDER_SIZE = 512;
     private Bitmap[] spiderFrames = new Bitmap[12];
     private float spiderX, spiderY;
@@ -68,11 +58,13 @@ public class MyView extends View {
     private final Random random = new Random();
     private Matrix spiderMatrix = new Matrix();
 
-
     public MyView(Context context) {
         super(context);
 
-        //load the digital font
+        // Make this view transparent so video shows through
+        setBackgroundColor(Color.TRANSPARENT);
+
+        // Load the digital font
         custom_font = Typeface.createFromAsset(context.getApplicationContext().getAssets(), "fonts/segments.ttf");
 
         // Load spider animation frames
@@ -80,33 +72,9 @@ public class MyView extends View {
 
         // Schedule first spider appearance (20-120 seconds from now)
         nextSpiderTime = System.currentTimeMillis() + 20000 + random.nextInt(100000);
-
-/*
-        //timer
-        final Handler h = new Handler();
-        if (true) {//everyminute update
-            h.postDelayed(new Runnable() {
-                @Override
-                public void run() {
-                    invalidate();
-                    h.postDelayed(this, 60000); // everyminute update
-                }
-            }, 60000 - (System.currentTimeMillis() % 60000)); //everyminute update
-        } else { //everysecond update
-            h.postDelayed(new Runnable() {
-                @Override
-                public void run() {
-                    invalidate();
-                    h.postDelayed(this, 1000);  // everysecond update
-                }
-            }, 1000); // everysecond update
-        }
-        */
     }
 
     private void loadSpiderFrames(Context context) {
-        // Load spider PNG files
-        // Adjust the resource IDs to match your actual drawable names
         spiderFrames[0] = BitmapFactory.decodeResource(context.getResources(), R.drawable.spider0);
         spiderFrames[1] = BitmapFactory.decodeResource(context.getResources(), R.drawable.spider2);
         spiderFrames[2] = BitmapFactory.decodeResource(context.getResources(), R.drawable.spider3);
@@ -124,36 +92,41 @@ public class MyView extends View {
     protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
 
-        //anti aliasing
+        // Clear canvas with transparency
+        canvas.drawColor(Color.TRANSPARENT);
+
+        // Anti aliasing
         paint.setFlags(Paint.ANTI_ALIAS_FLAG);
 
-        //get date & time
+        // Get date & time
         int[] date_time = getDateTime();
         String day_of_week = getDayOfWeek(date_time[3]);
-        Log.d("TIME",Calendar.getInstance().getTime().toString());
+        Log.d("TIME", Calendar.getInstance().getTime().toString());
 
-        SunriseSunsetCalculation.DayResult sun = sunCalc.calculateOfficialForDate(date_time[2],date_time[1],date_time[0]);
-        boolean isDay = Calendar.getInstance().getTime().after(sun.getOfficialSunrise()) && Calendar.getInstance().getTime().before(sun.getOfficialSunset());
+        SunriseSunsetCalculation.DayResult sun = sunCalc.calculateOfficialForDate(date_time[2], date_time[1], date_time[0]);
+        boolean isDay = Calendar.getInstance().getTime().after(sun.getOfficialSunrise()) &&
+                Calendar.getInstance().getTime().before(sun.getOfficialSunset());
 
         //draw background
-        paint.setStyle(Paint.Style.FILL);
-        paint.setColor(isDay ? Color.WHITE : Color.BLACK);
-        int frontColor = isDay ? Color.BLACK : Color.WHITE;
-        canvas.drawPaint(paint);
+        //paint.setStyle(Paint.Style.FILL);
+        //paint.setColor(isDay ? Color.WHITE : Color.BLACK);
+        //canvas.drawPaint(paint);
 
-        //get screen size & set widths, heights, others
+        int frontColor = Color.WHITE;// isDay ? Color.BLACK : Color.WHITE;
+
+        // Get screen size & set widths, heights, others
         int x = getWidth();
         int y = getHeight();
         int center_y = y / 2;
 
-        //show time
+        // Show time
         textPaintTime.setTypeface(custom_font);
         textPaintTime.setColor(frontColor);
         String[] time_str = addLeadingZeros(date_time[4], date_time[5], date_time[6]);
         String middle = String.valueOf(time_str[0] + ":" + time_str[1]);
-        container.set(0,0,x,y);
+        container.set(0, 0, x, y);
         float fontSize = calculateFontSize(textPaintTime, bounds, container, middle);
-        textPaintTime.setTextSize(fontSize*0.98F);
+        textPaintTime.setTextSize(fontSize * 0.98F);
 
         int x_pos = (x - bounds.width()) / 2;
         int y_pos = center_y + bounds.height() / 2;
@@ -162,14 +135,13 @@ public class MyView extends View {
         if (batteryLevel > 0) {
             textPaintInfo.setTextSize(y / 16F);
             textPaintInfo.setColor(frontColor);
-            canvas.drawText(String.format("%d%%",batteryLevel), 0, y - (y / 16F), textPaintInfo);
+            canvas.drawText(String.format("%d%%", batteryLevel), 0, y - (y / 16F), textPaintInfo);
         }
 
         long now = System.currentTimeMillis();
 
         // Spider animation logic
-        if (spiderEnabled && !spiderVisible && now > nextSpiderTime)
-        {
+        if (spiderEnabled && !spiderVisible && now > nextSpiderTime) {
             startSpiderAnimation();
             invalidate();
         }
@@ -188,8 +160,8 @@ public class MyView extends View {
             }
 
             // Check if spider is off screen
-            if (spiderX < -2*SPIDER_SIZE-spiderVX || spiderX > getWidth()+SPIDER_SIZE+spiderVX  ||
-                    spiderY < -2*SPIDER_SIZE-spiderVY || spiderY > getHeight()+SPIDER_SIZE+spiderVY ) {
+            if (spiderX < -2 * SPIDER_SIZE - spiderVX || spiderX > getWidth() + SPIDER_SIZE + spiderVX ||
+                    spiderY < -2 * SPIDER_SIZE - spiderVY || spiderY > getHeight() + SPIDER_SIZE + spiderVY) {
                 spiderVisible = false;
                 // Schedule next appearance (1-3 mins)
                 nextSpiderTime = now + 60000 + random.nextInt(120000);
@@ -199,16 +171,12 @@ public class MyView extends View {
         if (spiderVisible) {
             // Redraw for animation
             postInvalidateDelayed(50);
-        } else
-        {
+        } else {
             postInvalidateDelayed(1000);
-            //postInvalidateDelayed(60100-100*date_time[5]);
         }
-
     }
 
     private void drawRotatedSpider(Canvas canvas, Bitmap bitmap, float x, float y, float vx, float vy) {
-
         // Set up transformation matrix
         spiderMatrix.reset();
         spiderMatrix.postRotate(spiderAngle, bitmap.getWidth() / 2f, bitmap.getHeight() / 2f);
@@ -232,45 +200,45 @@ public class MyView extends View {
         switch (edge) {
             case 0: // left edge
                 spiderX = -SPIDER_SIZE;
-                spiderY = -SPIDER_SIZE+random.nextInt(height+SPIDER_SIZE);
+                spiderY = -SPIDER_SIZE + random.nextInt(height + SPIDER_SIZE);
                 break;
 
             case 1: // right edge
                 spiderX = width;
-                spiderY = -SPIDER_SIZE+random.nextInt(height+SPIDER_SIZE);
+                spiderY = -SPIDER_SIZE + random.nextInt(height + SPIDER_SIZE);
                 break;
 
             case 2: // top edge
-                spiderX = -SPIDER_SIZE+random.nextInt(width+SPIDER_SIZE);
+                spiderX = -SPIDER_SIZE + random.nextInt(width + SPIDER_SIZE);
                 spiderY = -SPIDER_SIZE;
                 break;
 
             case 3: // bottom edge
-                spiderX = -SPIDER_SIZE+random.nextInt(width+SPIDER_SIZE);
+                spiderX = -SPIDER_SIZE + random.nextInt(width + SPIDER_SIZE);
                 spiderY = height;
                 break;
         }
-        //dot within the screen for spider to crawl through
-        int xcen = random.nextInt(width-SPIDER_SIZE);
-        int ycen = random.nextInt(height-SPIDER_SIZE);
 
-        //length of vector from starting to targed point for speed calculation
-        int vlen = (int)Math.round(Math.sqrt( (spiderX-xcen)*(spiderX-xcen) + (spiderY-ycen)*(spiderY-ycen) ));
+        // Dot within the screen for spider to crawl through
+        int xcen = random.nextInt(width - SPIDER_SIZE);
+        int ycen = random.nextInt(height - SPIDER_SIZE);
+
+        // Length of vector from starting to target point for speed calculation
+        int vlen = (int) Math.round(Math.sqrt((spiderX - xcen) * (spiderX - xcen) + (spiderY - ycen) * (spiderY - ycen)));
 
         spiderVX = 30 * (xcen - spiderX) / vlen;
         spiderVY = 30 * (ycen - spiderY) / vlen;
 
-        spiderAngle = (float) Math.toDegrees(Math.atan2(spiderVY, spiderVX))+90f;
+        spiderAngle = (float) Math.toDegrees(Math.atan2(spiderVY, spiderVX)) + 90f;
     }
 
     private float calculateFontSize(Paint textPaint, Rect textBounds, Rect textContainer, String text) {
         int stage = 1;
         float textSize = 0;
 
-        while(stage < 3) {
+        while (stage < 3) {
             if (stage == 1) textSize += 10;
-            else
-            if (stage == 2) textSize -= 1;
+            else if (stage == 2) textSize -= 1;
 
             textPaint.setTextSize(textSize);
             textPaint.getTextBounds(text, 0, text.length(), textBounds);
@@ -281,27 +249,26 @@ public class MyView extends View {
 
             boolean fits = textContainer.contains(textBounds);
             if (stage == 1 && !fits) stage++;
-            else
-            if (stage == 2 &&  fits) stage++;
+            else if (stage == 2 && fits) stage++;
         }
 
         return textSize;
     }
 
-    private String[] addLeadingZeros(int hours, int minutes, int seconds){
+    private String[] addLeadingZeros(int hours, int minutes, int seconds) {
         String hours_str, minutes_str, seconds_str;
 
-        if(hours <= 9)
+        if (hours <= 9)
             hours_str = " " + hours;
         else
             hours_str = String.valueOf(hours);
 
-        if(minutes <= 9)
+        if (minutes <= 9)
             minutes_str = "0" + minutes;
         else
             minutes_str = String.valueOf(minutes);
 
-        if(seconds <= 9)
+        if (seconds <= 9)
             seconds_str = "0" + seconds;
         else
             seconds_str = String.valueOf(seconds);
@@ -310,13 +277,13 @@ public class MyView extends View {
         return values;
     }
 
-    private Rect measureString(String text, TextPaint tp){
+    private Rect measureString(String text, TextPaint tp) {
         Rect bounds = new Rect();
         tp.getTextBounds(text, 0, text.length(), bounds);
         return bounds;
     }
 
-    private int[] getDateTime(){
+    private int[] getDateTime() {
         Calendar calendar = Calendar.getInstance(Locale.getDefault());
         int year = calendar.get(Calendar.YEAR);
         int month = calendar.get(Calendar.MONTH);
@@ -326,12 +293,12 @@ public class MyView extends View {
         int mm = calendar.get(Calendar.MINUTE);
         int hh = calendar.get(Calendar.HOUR_OF_DAY);
 
-        int[] values = {year,month,day,day_of_week, hh, mm, ss };
+        int[] values = {year, month, day, day_of_week, hh, mm, ss};
         return values;
     }
 
-    private String getDayOfWeek(int day_of_week){
-        switch(day_of_week){
+    private String getDayOfWeek(int day_of_week) {
+        switch (day_of_week) {
             case Calendar.MONDAY:
                 return "MON";
             case Calendar.TUESDAY:
