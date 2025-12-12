@@ -16,6 +16,8 @@ import android.view.WindowManager;
 import android.widget.FrameLayout;
 
 import java.io.File;
+import java.util.ArrayList;
+import java.util.List;
 
 public class MainActivity extends Activity {
 
@@ -24,8 +26,8 @@ public class MainActivity extends Activity {
     private MyView myView;
 
     private static final String TAG = "MainActivity";
-    private static final String VIDEO_FOLDER = "Download";
-    private VideoBackgroundView videoView;
+    private static final String VIDEO_FOLDER = "Movies";
+    private CrossFadeVideoView videoView;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -75,12 +77,14 @@ public class MainActivity extends Activity {
 
 
         // Create and add video background view (bottom layer)
-        videoView = new VideoBackgroundView(this);
+        videoView = new CrossFadeVideoView(this);
         container.addView(videoView);
 
 // Create and add clock view (top layer)
         myView = new MyView(this);
         container.addView(myView);
+
+        myView.setVideoView(videoView);
 
         setContentView(container);
 
@@ -101,6 +105,9 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        if (videoView != null) {
+            videoView.cleanup();
+        }
         unregisterReceiver(batteryReceiver);
     }
 
@@ -143,41 +150,47 @@ public class MainActivity extends Activity {
 
         // Try external storage first (sdcard/StandClockVideos/)
         File externalDir = new File(Environment.getExternalStorageDirectory(), VIDEO_FOLDER);
+        Log.d(TAG, "Checking: " + externalDir.getAbsolutePath());
         if (externalDir.exists() && externalDir.isDirectory()) {
             videoDir = externalDir;
+            Log.d(TAG, "Found video directory: " + externalDir.getAbsolutePath());
         } else {
             // Try app-specific external storage
             File appExternalDir = new File(getExternalFilesDir(null), VIDEO_FOLDER);
+            Log.d(TAG, "Checking: " + appExternalDir.getAbsolutePath());
             if (appExternalDir.exists() && appExternalDir.isDirectory()) {
                 videoDir = appExternalDir;
+                Log.d(TAG, "Found video directory: " + appExternalDir.getAbsolutePath());
             }
         }
 
         if (videoDir != null) {
             File[] videoFiles = videoDir.listFiles();
+            Log.d(TAG, "Files in directory: " + (videoFiles != null ? videoFiles.length : 0));
+
             if (videoFiles != null && videoFiles.length > 0) {
+                List<String> videoPaths = new ArrayList<>();
+
                 for (File file : videoFiles) {
+                    Log.d(TAG, "Found file: " + file.getName() + " (" + file.length() + " bytes)");
                     String name = file.getName().toLowerCase();
                     if (name.endsWith(".mov") || name.endsWith(".mp4") ||
                             name.endsWith(".3gp") || name.endsWith(".mkv")) {
-                        String videoPath = file.getAbsolutePath();
-                        Log.d(TAG, "Loading video: " + videoPath);
-                        videoView.setVideoPath(videoPath);
-                        return;
+                        videoPaths.add(file.getAbsolutePath());
+                        Log.d(TAG, "Added to playlist: " + file.getName());
                     }
+                }
+
+                if (!videoPaths.isEmpty()) {
+                    Log.d(TAG, "Setting playlist with " + videoPaths.size() + " videos");
+                    videoView.setVideoPlaylist(videoPaths);
+                    return;
                 }
             }
         }
 
-        Log.w(TAG, "No video files found. Looking for folder: " + VIDEO_FOLDER);
+        Log.w(TAG, "No video files found in: " + VIDEO_FOLDER);
     }
-
-    public void changeVideo(String videoPath) {
-        if (videoView != null) {
-            videoView.changeVideo(videoPath);
-        }
-    }
-
     @Override
     protected void onPause() {
         super.onPause();
@@ -193,6 +206,8 @@ public class MainActivity extends Activity {
             videoView.resumeVideo();
         }
     }
+
+
     private class BatteryStatusReceiver extends BroadcastReceiver {
         @Override
         public void onReceive(Context context, Intent intent) {

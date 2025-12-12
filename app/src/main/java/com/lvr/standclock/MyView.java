@@ -43,6 +43,11 @@ public class MyView extends View {
         }
     }
     private SunriseSunsetCalculation sunCalc = new SunriseSunsetCalculation(19.457216, 51.759445);
+    private CrossFadeVideoView videoView;
+
+    public void setVideoView(CrossFadeVideoView videoView) {
+        this.videoView = videoView;
+    }
 
     // Spider animation variables
     private int SPIDER_SIZE = 512;
@@ -103,16 +108,14 @@ public class MyView extends View {
         String day_of_week = getDayOfWeek(date_time[3]);
         Log.d("TIME", Calendar.getInstance().getTime().toString());
 
+        //TODO: don't calculate times on every update - it's better to do it once per day
         SunriseSunsetCalculation.DayResult sun = sunCalc.calculateOfficialForDate(date_time[2], date_time[1], date_time[0]);
         boolean isDay = Calendar.getInstance().getTime().after(sun.getOfficialSunrise()) &&
                 Calendar.getInstance().getTime().before(sun.getOfficialSunset());
 
-        //draw background
-        //paint.setStyle(Paint.Style.FILL);
-        //paint.setColor(isDay ? Color.WHITE : Color.BLACK);
-        //canvas.drawPaint(paint);
+        int frontColor = isDay ? Color.BLACK : Color.WHITE;
 
-        int frontColor = Color.WHITE;// isDay ? Color.BLACK : Color.WHITE;
+        videoView.updateDayNightMode(isDay);
 
         // Get screen size & set widths, heights, others
         int x = getWidth();
