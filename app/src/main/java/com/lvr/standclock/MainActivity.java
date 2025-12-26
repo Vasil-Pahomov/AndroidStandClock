@@ -23,7 +23,8 @@ public class MainActivity extends Activity {
 
     private BatteryStatusReceiver batteryReceiver;
 
-    private MyView myView;
+    private ClockView clockView;
+    private SpiderView spiderView;
 
     private static final String TAG = "MainActivity";
     private static final String VIDEO_FOLDER = "Movies";
@@ -80,11 +81,16 @@ public class MainActivity extends Activity {
         videoView = new CrossFadeVideoView(this);
         container.addView(videoView);
 
-// Create and add clock view (top layer)
-        myView = new MyView(this);
-        container.addView(myView);
+        // Create and add clock view (top layer)
+        clockView = new ClockView(this);
+        container.addView(clockView);
 
-        myView.setVideoView(videoView);
+        //todo: unbind it - views should be independent on each other
+        clockView.setVideoView(videoView);
+
+        //Spider view
+        spiderView = new SpiderView(this);
+        container.addView(spiderView);
 
         setContentView(container);
 
@@ -115,7 +121,7 @@ public class MainActivity extends Activity {
     public boolean onKeyDown(int keyCode, KeyEvent event) {
         if (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) {
             // Trigger spider animation
-            myView.triggerSpider();
+            spiderView.triggerSpider();
             // Return true to consume the event and prevent volume change
             return true;
         }
@@ -137,10 +143,10 @@ public class MainActivity extends Activity {
                     status == BatteryManager.BATTERY_STATUS_FULL;
 
             // Update the custom view
-            if (myView != null) {
-                myView.setBatteryLevel(isCharging ? -1 : batteryLevel);
+            if (clockView != null) {
+                clockView.setBatteryLevel(isCharging ? -1 : batteryLevel);
 
-                myView.postInvalidate();
+                clockView.postInvalidate();
             }
         }
     }

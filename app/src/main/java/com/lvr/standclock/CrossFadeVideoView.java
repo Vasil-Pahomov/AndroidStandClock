@@ -24,7 +24,11 @@ public class CrossFadeVideoView extends FrameLayout {
     private static final int FADE_DURATION = 1000;
     private static final float VIDEO_BRIGHTNESS_DAY = 1.0f;
     private static final float VIDEO_BRIGHTNESS_NIGHT = 0.8f;
-    private static final long PREPARE_ADVANCE_TIME = 2000;
+
+    // Start preparing next video this early (relative to ACTUAL video end)
+    private static final long PREPARE_BEFORE_END = 3000; // 3 seconds before video ends
+
+    // Start next video playback this early
     private static final long START_ADVANCE_TIME = 300;
 
     private VideoLayer layer1;
@@ -52,7 +56,6 @@ public class CrossFadeVideoView extends FrameLayout {
 
     private int currentVideoDuration = 0;
     private int nextVideoDuration = 0;
-    private long currentVideoStartTime = 0;
 
     private HandlerThread backgroundThread;
     private Handler backgroundHandler;
@@ -190,7 +193,6 @@ public class CrossFadeVideoView extends FrameLayout {
             @Override
             public void onPrepared(int duration) {
                 currentVideoDuration = duration;
-                currentVideoStartTime = System.currentTimeMillis();
 
                 currentLayer.start();
 
@@ -198,7 +200,9 @@ public class CrossFadeVideoView extends FrameLayout {
                     fadeIn(currentLayer, currentVideoBrightness);
                 }
 
-                long delayUntilPreparation = duration - FADE_DURATION - PREPARE_ADVANCE_TIME;
+                // NEW: Schedule preparation based on duration
+                // But crossfade will be triggered by onNearingCompletion
+                long delayUntilPreparation = duration - PREPARE_BEFORE_END;
                 if (delayUntilPreparation > 0) {
                     postDelayed(new Runnable() {
                         @Override
@@ -216,12 +220,29 @@ public class CrossFadeVideoView extends FrameLayout {
                 Log.e(TAG, "Error playing video");
                 playNextVideo();
             }
+
+            @Override
+            public void onNearingCompletion() {
+                // NEW: Called FADE_DURATION before video actually ends
+                // This triggers the crossfade at the right time
+                Log.d(TAG + "Timing", "Video nearing completion, starting crossfade");
+
+                if (nextVideoReady && !nextVideoStarted) {
+                    // Start next video if not already started
+                    startNextVideoAsync();
+                }
+
+                // Start crossfade
+                postDelayed(new Runnable() {
+                    @Override
+                    public void run() {
+                        beginCrossFade();
+                    }
+                }, START_ADVANCE_TIME);
+            }
         });
     }
 
-    /**
-     * NEW: Completely async preparation - everything on background thread
-     */
     private void prepareNextVideoAsync() {
         backgroundHandler.post(new Runnable() {
             @Override
@@ -231,10 +252,9 @@ public class CrossFadeVideoView extends FrameLayout {
         });
     }
 
-    /**
-     * NEW: All video preparation happens on background thread
-     */
     private void prepareNextVideoBackground() {
+        Log.d(TAG + "Timing", "Starting preparing next video");
+
         final List<String> playlist = getCurrentPlaylist();
 
         if (playlist.isEmpty()) {
@@ -260,7 +280,6 @@ public class CrossFadeVideoView extends FrameLayout {
         final String filename = file.getName();
         final float brightness = calculateVideoBrightness(videoPath, filename, isDay);
 
-        // Update state on main thread
         mainHandler.post(new Runnable() {
             @Override
             public void run() {
@@ -273,12 +292,10 @@ public class CrossFadeVideoView extends FrameLayout {
             }
         });
 
-        // NEW: Load video entirely on background thread
         nextLayer.loadVideoAsync(videoPath, backgroundHandler, new VideoLayer.VideoCallback() {
             @Override
             public void onPrepared(final int duration) {
-                // Callback comes from background thread
-                Log.d(TAG, "Next video loaded on background thread");
+                Log.d(TAG + "Timing", "Next video loaded on background thread");
 
                 mainHandler.post(new Runnable() {
                     @Override
@@ -286,43 +303,7 @@ public class CrossFadeVideoView extends FrameLayout {
                         nextVideoReady = true;
                         nextVideoDuration = duration;
 
-                        long elapsed = System.currentTimeMillis() - currentVideoStartTime;
-                        long remaining = currentVideoDuration - elapsed;
-
-                        long timeUntilCrossFade = remaining - FADE_DURATION;
-                        long timeUntilStart = timeUntilCrossFade - START_ADVANCE_TIME;
-
-                        if (timeUntilStart > 0) {
-                            scheduledStart = new Runnable() {
-                                @Override
-                                public void run() {
-                                    startNextVideoAsync();
-                                }
-                            };
-                            postDelayed(scheduledStart, timeUntilStart);
-                        } else {
-                            startNextVideoAsync();
-                        }
-
-                        if (timeUntilCrossFade > 0) {
-                            scheduledCrossFade = new Runnable() {
-                                @Override
-                                public void run() {
-                                    beginCrossFade();
-                                }
-                            };
-                            postDelayed(scheduledCrossFade, timeUntilCrossFade);
-                        } else {
-                            if (!nextVideoStarted) {
-                                startNextVideoAsync();
-                            }
-                            postDelayed(new Runnable() {
-                                @Override
-                                public void run() {
-                                    beginCrossFade();
-                                }
-                            }, 50);
-                        }
+                        // Next video is ready, will be started when current video nears completion
                     }
                 });
             }
@@ -343,6 +324,11 @@ public class CrossFadeVideoView extends FrameLayout {
                     }
                 });
             }
+
+            @Override
+            public void onNearingCompletion() {
+                // Not used for next video
+            }
         });
     }
 
@@ -351,6 +337,8 @@ public class CrossFadeVideoView extends FrameLayout {
             return;
         }
 
+        Log.d(TAG + "Timing", "Starting next video");
+
         backgroundHandler.post(new Runnable() {
             @Override
             public void run() {
@@ -358,6 +346,8 @@ public class CrossFadeVideoView extends FrameLayout {
                     nextLayer.seekTo(0);
                     Thread.sleep(10);
                     nextLayer.start();
+
+                    Log.d(TAG + "Timing", "Video started");
 
                     mainHandler.post(new Runnable() {
                         @Override
@@ -394,6 +384,7 @@ public class CrossFadeVideoView extends FrameLayout {
             return;
         }
 
+        Log.d(TAG + "Timing", "Starting crossfade");
         performCrossFade();
     }
 
@@ -431,32 +422,57 @@ public class CrossFadeVideoView extends FrameLayout {
                 currentVideoBrightness = endBrightness;
                 currentVideoPath = nextVideoPath;
                 currentVideoDuration = nextVideoDuration;
-                currentVideoStartTime = System.currentTimeMillis();
                 nextVideoReady = false;
                 nextVideoStarted = false;
+
+                Log.d(TAG + "Timing", "Stopped crossfade");
+
+                // Setup completion monitoring for the new current video
+                currentLayer.setupCompletionCallback(new VideoLayer.VideoCallback() {
+                    @Override
+                    public void onPrepared(int duration) {
+                        // Not used
+                    }
+
+                    @Override
+                    public void onError() {
+                        // Not used
+                    }
+
+                    @Override
+                    public void onNearingCompletion() {
+                        Log.d(TAG + "Timing", "Video nearing completion, starting crossfade");
+
+                        if (nextVideoReady && !nextVideoStarted) {
+                            startNextVideoAsync();
+                        }
+
+                        postDelayed(new Runnable() {
+                            @Override
+                            public void run() {
+                                beginCrossFade();
+                            }
+                        }, START_ADVANCE_TIME);
+                    }
+                });
+
+                // Schedule preparation of next video
+                long delayUntilPreparation = currentVideoDuration - PREPARE_BEFORE_END;
+                if (delayUntilPreparation > 0) {
+                    postDelayed(new Runnable() {
+                        @Override
+                        public void run() {
+                            prepareNextVideoAsync();
+                        }
+                    }, delayUntilPreparation);
+                } else {
+                    prepareNextVideoAsync();
+                }
 
                 backgroundHandler.post(new Runnable() {
                     @Override
                     public void run() {
                         fadingOut.stop();
-
-                        mainHandler.post(new Runnable() {
-                            @Override
-                            public void run() {
-                                long delayUntilPreparation = currentVideoDuration - FADE_DURATION - PREPARE_ADVANCE_TIME;
-
-                                if (delayUntilPreparation > 0) {
-                                    postDelayed(new Runnable() {
-                                        @Override
-                                        public void run() {
-                                            prepareNextVideoAsync();
-                                        }
-                                    }, delayUntilPreparation);
-                                } else {
-                                    prepareNextVideoAsync();
-                                }
-                            }
-                        });
                     }
                 });
             }
@@ -528,36 +544,6 @@ public class CrossFadeVideoView extends FrameLayout {
     public void resumeVideo() {
         if (currentLayer != null) {
             currentLayer.resume();
-
-            if (nextVideoReady) {
-                long elapsed = System.currentTimeMillis() - currentVideoStartTime;
-                long remaining = currentVideoDuration - elapsed;
-
-                long timeUntilCrossFade = remaining - FADE_DURATION;
-                long timeUntilStart = timeUntilCrossFade - START_ADVANCE_TIME;
-
-                if (!nextVideoStarted && timeUntilStart > 0) {
-                    scheduledStart = new Runnable() {
-                        @Override
-                        public void run() {
-                            startNextVideoAsync();
-                        }
-                    };
-                    postDelayed(scheduledStart, timeUntilStart);
-                } else if (!nextVideoStarted) {
-                    startNextVideoAsync();
-                }
-
-                if (timeUntilCrossFade > 0) {
-                    scheduledCrossFade = new Runnable() {
-                        @Override
-                        public void run() {
-                            beginCrossFade();
-                        }
-                    };
-                    postDelayed(scheduledCrossFade, timeUntilCrossFade);
-                }
-            }
         }
         if (nextLayer != null && nextLayer.isPlaying()) {
             nextLayer.resume();
@@ -587,35 +573,36 @@ public class CrossFadeVideoView extends FrameLayout {
         }
     }
 
-    /**
-     * VideoLayer with background loading support
-     */
     private static class VideoLayer extends TextureView implements TextureView.SurfaceTextureListener {
         private static final String TAG = "VideoLayer";
         private MediaPlayer mediaPlayer;
         private Surface surface;
         private boolean surfaceReady = false;
         private final Object mediaPlayerLock = new Object();
+        private Handler completionCheckHandler;
+        private Runnable completionCheckRunnable;
+        private VideoCallback currentCallback;
 
         interface VideoCallback {
             void onPrepared(int duration);
             void onError();
+            void onNearingCompletion();  // NEW: Called FADE_DURATION before end
         }
 
         public VideoLayer(Context context) {
             super(context);
             setOpaque(false);
             setSurfaceTextureListener(this);
+            completionCheckHandler = new Handler(Looper.getMainLooper());
         }
 
         public boolean isReady() {
             return surfaceReady;
         }
 
-        /**
-         * Standard loadVideo for first video (on main thread)
-         */
         public void loadVideo(String videoPath, final VideoCallback callback) {
+            this.currentCallback = callback;
+
             try {
                 synchronized (mediaPlayerLock) {
                     if (mediaPlayer != null) {
@@ -631,7 +618,11 @@ public class CrossFadeVideoView extends FrameLayout {
                     mediaPlayer.setOnPreparedListener(new MediaPlayer.OnPreparedListener() {
                         @Override
                         public void onPrepared(MediaPlayer mp) {
-                            callback.onPrepared(mp.getDuration());
+                            int duration = mp.getDuration();
+                            callback.onPrepared(duration);
+
+                            // NEW: Start monitoring for near-completion
+                            startCompletionMonitoring(duration);
                         }
                     });
 
@@ -644,6 +635,14 @@ public class CrossFadeVideoView extends FrameLayout {
                         }
                     });
 
+                    mediaPlayer.setOnCompletionListener(new MediaPlayer.OnCompletionListener() {
+                        @Override
+                        public void onCompletion(MediaPlayer mp) {
+                            Log.d(TAG + "Timing", "Video ended");
+                            stopCompletionMonitoring();
+                        }
+                    });
+
                     mediaPlayer.prepareAsync();
                 }
             } catch (Exception e) {
@@ -653,33 +652,28 @@ public class CrossFadeVideoView extends FrameLayout {
             }
         }
 
-        /**
-         * NEW: Async loadVideo - all blocking operations on background thread
-         */
         public void loadVideoAsync(final String videoPath, Handler backgroundHandler, final VideoCallback callback) {
+            this.currentCallback = callback;
+
             backgroundHandler.post(new Runnable() {
                 @Override
                 public void run() {
                     try {
-                        Log.d(TAG, "Loading video on background thread: " + videoPath);
-
                         synchronized (mediaPlayerLock) {
-                            // All these blocking operations now on background thread!
                             if (mediaPlayer != null) {
-                                mediaPlayer.reset();  // 55ms - now on background!
+                                mediaPlayer.reset();
                             } else {
                                 mediaPlayer = new MediaPlayer();
                             }
 
-                            mediaPlayer.setDataSource(videoPath);  // 179ms - now on background!
-                            mediaPlayer.setSurface(surface);       // 3ms - now on background!
+                            mediaPlayer.setDataSource(videoPath);
+                            mediaPlayer.setSurface(surface);
                             mediaPlayer.setVolume(0f, 0f);
+                            mediaPlayer.setLooping(true);  // Loop so video doesn't end during crossfade
 
-                            // Prepare listener - will be called on background thread
                             mediaPlayer.setOnPreparedListener(new MediaPlayer.OnPreparedListener() {
                                 @Override
                                 public void onPrepared(MediaPlayer mp) {
-                                    // This callback happens on background thread
                                     int duration = mp.getDuration();
                                     callback.onPrepared(duration);
                                 }
@@ -694,11 +688,8 @@ public class CrossFadeVideoView extends FrameLayout {
                                 }
                             });
 
-                            mediaPlayer.prepareAsync();  // Still async, but initiated from background
+                            mediaPlayer.prepareAsync();
                         }
-
-                        Log.d(TAG, "Video loading initiated on background thread");
-
                     } catch (Exception e) {
                         Log.e(TAG, "Exception loading video async: " + e.getMessage());
                         e.printStackTrace();
@@ -706,6 +697,65 @@ public class CrossFadeVideoView extends FrameLayout {
                     }
                 }
             });
+        }
+
+        /**
+         * NEW: Monitor video position and trigger callback when nearing completion
+         */
+        private void startCompletionMonitoring(final int duration) {
+            stopCompletionMonitoring();
+
+            completionCheckRunnable = new Runnable() {
+                @Override
+                public void run() {
+                    synchronized (mediaPlayerLock) {
+                        if (mediaPlayer != null && mediaPlayer.isPlaying()) {
+                            try {
+                                int currentPosition = mediaPlayer.getCurrentPosition();
+                                int remaining = duration - currentPosition;
+
+                                // Trigger callback when remaining time ≤ FADE_DURATION + buffer
+                                // The +200ms buffer ensures video is still playing when crossfade ends
+                                if (remaining <= 1200 && remaining > 0) {  // FADE_DURATION + 200ms buffer
+                                    if (currentCallback != null) {
+                                        currentCallback.onNearingCompletion();
+                                        currentCallback = null;  // Only call once
+                                    }
+                                    return;  // Stop checking
+                                }
+
+                                // Check again in 100ms
+                                completionCheckHandler.postDelayed(this, 100);
+                            } catch (Exception e) {
+                                // Video might have ended
+                            }
+                        }
+                    }
+                }
+            };
+
+            completionCheckHandler.postDelayed(completionCheckRunnable, 100);
+        }
+
+        private void stopCompletionMonitoring() {
+            if (completionCheckRunnable != null) {
+                completionCheckHandler.removeCallbacks(completionCheckRunnable);
+                completionCheckRunnable = null;
+            }
+        }
+
+        /**
+         * NEW: Setup completion callback for already-playing video
+         * Used when video becomes current layer after crossfade
+         */
+        public void setupCompletionCallback(VideoCallback callback) {
+            this.currentCallback = callback;
+
+            // Start monitoring with the known duration
+            int duration = getDuration();
+            if (duration > 0 && isPlaying()) {
+                startCompletionMonitoring(duration);
+            }
         }
 
         public void start() {
@@ -733,6 +783,7 @@ public class CrossFadeVideoView extends FrameLayout {
         }
 
         public void stop() {
+            stopCompletionMonitoring();
             synchronized (mediaPlayerLock) {
                 if (mediaPlayer != null) {
                     try {
@@ -814,6 +865,7 @@ public class CrossFadeVideoView extends FrameLayout {
         }
 
         public void cleanup() {
+            stopCompletionMonitoring();
             synchronized (mediaPlayerLock) {
                 if (mediaPlayer != null) {
                     try {
