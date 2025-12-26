@@ -4,6 +4,9 @@ import android.animation.ValueAnimator;
 import android.content.Context;
 import android.graphics.SurfaceTexture;
 import android.media.MediaPlayer;
+import android.os.Handler;
+import android.os.HandlerThread;
+import android.os.Looper;
 import android.util.Log;
 import android.view.Surface;
 import android.view.TextureView;
@@ -11,19 +14,18 @@ import android.view.animation.LinearInterpolator;
 import android.widget.FrameLayout;
 
 import java.io.File;
-import java.io.FileInputStream;
-import java.io.IOException;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 import java.util.Random;
 
 public class CrossFadeVideoView extends FrameLayout {
 
     private static final String TAG = "CrossFadeVideoView";
-    private static final int FADE_DURATION = 1000; // 1 second cross-fade
+    private static final int FADE_DURATION = 1000;
     private static final float VIDEO_BRIGHTNESS_DAY = 1.0f;
-    private static final float VIDEO_BRIGHTNESS_NIGHT = 0.5f;
+    private static final float VIDEO_BRIGHTNESS_NIGHT = 0.8f;
+    private static final long PREPARE_ADVANCE_TIME = 2000;
+    private static final long START_ADVANCE_TIME = 300;
 
     private VideoLayer layer1;
     private VideoLayer layer2;
@@ -37,16 +39,36 @@ public class CrossFadeVideoView extends FrameLayout {
     private Random random = new Random();
     private ValueAnimator crossFadeAnimator;
     private boolean isDay = true;
-    private float currentBrightness = VIDEO_BRIGHTNESS_DAY;
+
+    private float currentVideoBrightness = VIDEO_BRIGHTNESS_DAY;
+    private float nextVideoBrightness = VIDEO_BRIGHTNESS_DAY;
+    private String currentVideoPath = null;
+    private String nextVideoPath = null;
+
+    private boolean nextVideoReady = false;
+    private boolean nextVideoStarted = false;
+    private Runnable scheduledCrossFade = null;
+    private Runnable scheduledStart = null;
+
+    private int currentVideoDuration = 0;
+    private int nextVideoDuration = 0;
+    private long currentVideoStartTime = 0;
+
+    private HandlerThread backgroundThread;
+    private Handler backgroundHandler;
+    private Handler mainHandler;
 
     public CrossFadeVideoView(Context context) {
         super(context);
 
-        // Create two video layers
+        setLayerType(LAYER_TYPE_HARDWARE, null);
+
         layer1 = new VideoLayer(context);
         layer2 = new VideoLayer(context);
 
-        // Add both layers to the FrameLayout
+        layer1.setLayerType(LAYER_TYPE_HARDWARE, null);
+        layer2.setLayerType(LAYER_TYPE_HARDWARE, null);
+
         addView(layer1, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT));
@@ -54,11 +76,15 @@ public class CrossFadeVideoView extends FrameLayout {
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT));
 
-        // Start with layer1 as current, layer2 invisible
         currentLayer = layer1;
         nextLayer = layer2;
         currentLayer.setAlpha(0f);
         nextLayer.setAlpha(0f);
+
+        backgroundThread = new HandlerThread("VideoBackground", Thread.MAX_PRIORITY);
+        backgroundThread.start();
+        backgroundHandler = new Handler(backgroundThread.getLooper());
+        mainHandler = new Handler(Looper.getMainLooper());
 
         Log.d(TAG, "CrossFadeVideoView created");
     }
@@ -66,7 +92,6 @@ public class CrossFadeVideoView extends FrameLayout {
     public void setVideoPlaylist(List<String> videoPaths) {
         this.allVideoPaths = new ArrayList<>(videoPaths);
 
-        // Separate videos into day and night lists
         dayVideos.clear();
         nightVideos.clear();
 
@@ -82,9 +107,8 @@ public class CrossFadeVideoView extends FrameLayout {
             }
         }
 
-        Log.d(TAG, "Playlist set - Day videos: " + dayVideos.size() + ", Night videos: " + nightVideos.size());
+        Log.d(TAG, "Playlist set - Day: " + dayVideos.size() + ", Night: " + nightVideos.size());
 
-        // Wait for surfaces to be ready
         postDelayed(new Runnable() {
             @Override
             public void run() {
@@ -101,18 +125,43 @@ public class CrossFadeVideoView extends FrameLayout {
         if (this.isDay != isDayTime) {
             Log.d(TAG, "Day/Night mode changed to: " + (isDayTime ? "DAY" : "NIGHT"));
             this.isDay = isDayTime;
-            this.currentBrightness = isDayTime ? VIDEO_BRIGHTNESS_DAY : VIDEO_BRIGHTNESS_NIGHT;
-
-            // Reset video index to force new selection from appropriate list
             currentVideoIndex = -1;
         }
+    }
+
+    protected float calculateVideoBrightness(String videoPath, String filename, boolean isDayTime) {
+        filename = filename.toLowerCase();
+
+        if (filename.contains("b_")) {
+            try {
+                int startIdx = filename.indexOf("b_") + 2;
+                int endIdx = startIdx + 2;
+                if (endIdx <= filename.length()) {
+                    String brightnessStr = filename.substring(startIdx, endIdx);
+                    int brightness = Integer.parseInt(brightnessStr);
+                    float result = brightness / 100.0f;
+                    return Math.max(0.0f, Math.min(1.0f, result));
+                }
+            } catch (Exception e) {
+                // ignore
+            }
+        }
+
+        if (filename.startsWith("n_")) {
+            return 1.0f;
+        } else if (filename.startsWith("d_")) {
+            return 1.0f;
+        } else if (filename.contains("dn_")) {
+            return 0.5f;
+        }
+
+        return isDayTime ? VIDEO_BRIGHTNESS_DAY : VIDEO_BRIGHTNESS_NIGHT;
     }
 
     private List<String> getCurrentPlaylist() {
         List<String> playlist = isDay ? dayVideos : nightVideos;
 
         if (playlist.isEmpty()) {
-            Log.w(TAG, "No videos for current time period, using all videos");
             return allVideoPaths;
         }
 
@@ -127,76 +176,225 @@ public class CrossFadeVideoView extends FrameLayout {
             return;
         }
 
-        // Pick a random video from the current playlist
         currentVideoIndex = random.nextInt(playlist.size());
 
-        String videoPath = playlist.get(currentVideoIndex);
-        Log.d(TAG, "Playing " + (isDay ? "DAY" : "NIGHT") + " video (" +
-                (currentVideoIndex + 1) + "/" + playlist.size() + "): " + new File(videoPath).getName());
+        final String videoPath = playlist.get(currentVideoIndex);
+        currentVideoPath = videoPath;
+
+        String filename = new File(videoPath).getName();
+        currentVideoBrightness = calculateVideoBrightness(videoPath, filename, isDay);
+
+        Log.d(TAG, "Playing video: " + filename + " (brightness: " + currentVideoBrightness + ")");
 
         currentLayer.loadVideo(videoPath, new VideoLayer.VideoCallback() {
             @Override
             public void onPrepared(int duration) {
-                Log.d(TAG, "Video prepared, duration: " + duration + "ms");
+                currentVideoDuration = duration;
+                currentVideoStartTime = System.currentTimeMillis();
+
                 currentLayer.start();
 
-                // Fade in first video or keep brightness for subsequent
                 if (currentLayer.getAlpha() == 0f) {
-                    fadeIn(currentLayer);
+                    fadeIn(currentLayer, currentVideoBrightness);
                 }
 
-                // Schedule cross-fade before video ends
-                long delayUntilCrossFade = duration - FADE_DURATION;
-                if (delayUntilCrossFade > 0) {
+                long delayUntilPreparation = duration - FADE_DURATION - PREPARE_ADVANCE_TIME;
+                if (delayUntilPreparation > 0) {
                     postDelayed(new Runnable() {
                         @Override
                         public void run() {
-                            prepareAndCrossFade();
+                            prepareNextVideoAsync();
                         }
-                    }, delayUntilCrossFade);
+                    }, delayUntilPreparation);
                 } else {
-                    Log.w(TAG, "Video too short for cross-fade");
+                    prepareNextVideoAsync();
                 }
             }
 
             @Override
             public void onError() {
-                Log.e(TAG, "Error playing video, trying next");
+                Log.e(TAG, "Error playing video");
                 playNextVideo();
             }
         });
     }
 
-    private void prepareAndCrossFade() {
-        List<String> playlist = getCurrentPlaylist();
+    /**
+     * NEW: Completely async preparation - everything on background thread
+     */
+    private void prepareNextVideoAsync() {
+        backgroundHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                prepareNextVideoBackground();
+            }
+        });
+    }
+
+    /**
+     * NEW: All video preparation happens on background thread
+     */
+    private void prepareNextVideoBackground() {
+        final List<String> playlist = getCurrentPlaylist();
 
         if (playlist.isEmpty()) {
-            Log.w(TAG, "No videos available for cross-fade");
-            fadeOutAndPlayNext();
             return;
         }
 
-        // Pick a random video from current playlist
         int nextIndex = random.nextInt(playlist.size());
-        String nextVideoPath = playlist.get(nextIndex);
+        final String videoPath = playlist.get(nextIndex);
 
-        Log.d(TAG, "Preparing next " + (isDay ? "DAY" : "NIGHT") + " video for cross-fade: " +
-                new File(nextVideoPath).getName());
+        final File file = new File(videoPath);
 
-        nextLayer.loadVideo(nextVideoPath, new VideoLayer.VideoCallback() {
+        if (!file.exists() || !file.canRead()) {
+            Log.e(TAG, "Cannot access video: " + videoPath);
+            mainHandler.post(new Runnable() {
+                @Override
+                public void run() {
+                    prepareNextVideoAsync();
+                }
+            });
+            return;
+        }
+
+        final String filename = file.getName();
+        final float brightness = calculateVideoBrightness(videoPath, filename, isDay);
+
+        // Update state on main thread
+        mainHandler.post(new Runnable() {
             @Override
-            public void onPrepared(int duration) {
-                Log.d(TAG, "Next video prepared, starting cross-fade");
-                nextLayer.start();
-                performCrossFade();
+            public void run() {
+                nextVideoPath = videoPath;
+                nextVideoBrightness = brightness;
+                nextVideoReady = false;
+                nextVideoStarted = false;
+
+                Log.d(TAG, "Pre-loading next video: " + filename + " (brightness: " + nextVideoBrightness + ")");
+            }
+        });
+
+        // NEW: Load video entirely on background thread
+        nextLayer.loadVideoAsync(videoPath, backgroundHandler, new VideoLayer.VideoCallback() {
+            @Override
+            public void onPrepared(final int duration) {
+                // Callback comes from background thread
+                Log.d(TAG, "Next video loaded on background thread");
+
+                mainHandler.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        nextVideoReady = true;
+                        nextVideoDuration = duration;
+
+                        long elapsed = System.currentTimeMillis() - currentVideoStartTime;
+                        long remaining = currentVideoDuration - elapsed;
+
+                        long timeUntilCrossFade = remaining - FADE_DURATION;
+                        long timeUntilStart = timeUntilCrossFade - START_ADVANCE_TIME;
+
+                        if (timeUntilStart > 0) {
+                            scheduledStart = new Runnable() {
+                                @Override
+                                public void run() {
+                                    startNextVideoAsync();
+                                }
+                            };
+                            postDelayed(scheduledStart, timeUntilStart);
+                        } else {
+                            startNextVideoAsync();
+                        }
+
+                        if (timeUntilCrossFade > 0) {
+                            scheduledCrossFade = new Runnable() {
+                                @Override
+                                public void run() {
+                                    beginCrossFade();
+                                }
+                            };
+                            postDelayed(scheduledCrossFade, timeUntilCrossFade);
+                        } else {
+                            if (!nextVideoStarted) {
+                                startNextVideoAsync();
+                            }
+                            postDelayed(new Runnable() {
+                                @Override
+                                public void run() {
+                                    beginCrossFade();
+                                }
+                            }, 50);
+                        }
+                    }
+                });
             }
 
             @Override
             public void onError() {
-                Log.e(TAG, "Error preparing next video, using simple fade");
-                fadeOutAndPlayNext();
+                Log.e(TAG, "Error preparing next video");
+                mainHandler.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        nextVideoReady = false;
+                        postDelayed(new Runnable() {
+                            @Override
+                            public void run() {
+                                prepareNextVideoAsync();
+                            }
+                        }, 500);
+                    }
+                });
             }
         });
+    }
+
+    private void startNextVideoAsync() {
+        if (!nextVideoReady || nextVideoStarted) {
+            return;
+        }
+
+        backgroundHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    nextLayer.seekTo(0);
+                    Thread.sleep(10);
+                    nextLayer.start();
+
+                    mainHandler.post(new Runnable() {
+                        @Override
+                        public void run() {
+                            nextVideoStarted = true;
+                        }
+                    });
+                } catch (Exception e) {
+                    Log.e(TAG, "Error starting next video: " + e.getMessage());
+                }
+            }
+        });
+    }
+
+    private void beginCrossFade() {
+        if (!nextVideoReady) {
+            postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    beginCrossFade();
+                }
+            }, 50);
+            return;
+        }
+
+        if (!nextVideoStarted) {
+            startNextVideoAsync();
+            postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    performCrossFade();
+                }
+            }, 100);
+            return;
+        }
+
+        performCrossFade();
     }
 
     private void performCrossFade() {
@@ -207,6 +405,9 @@ public class CrossFadeVideoView extends FrameLayout {
         final VideoLayer fadingOut = currentLayer;
         final VideoLayer fadingIn = nextLayer;
 
+        final float startBrightness = currentVideoBrightness;
+        final float endBrightness = nextVideoBrightness;
+
         crossFadeAnimator = ValueAnimator.ofFloat(0f, 1f);
         crossFadeAnimator.setDuration(FADE_DURATION);
         crossFadeAnimator.setInterpolator(new LinearInterpolator());
@@ -215,55 +416,57 @@ public class CrossFadeVideoView extends FrameLayout {
             @Override
             public void onAnimationUpdate(ValueAnimator animation) {
                 float progress = animation.getAnimatedFraction();
-                fadingOut.setAlpha(currentBrightness * (1f - progress));
-                fadingIn.setAlpha(currentBrightness * progress);
+                fadingOut.setAlpha(startBrightness * (1f - progress));
+                fadingIn.setAlpha(endBrightness * progress);
             }
         });
 
         crossFadeAnimator.addListener(new android.animation.AnimatorListenerAdapter() {
             @Override
             public void onAnimationEnd(android.animation.Animator animation) {
-                // Stop and release the old video
-                fadingOut.stop();
-
-                // Swap layers
                 VideoLayer temp = currentLayer;
                 currentLayer = nextLayer;
                 nextLayer = temp;
 
-                Log.d(TAG, "Cross-fade complete, layers swapped");
+                currentVideoBrightness = endBrightness;
+                currentVideoPath = nextVideoPath;
+                currentVideoDuration = nextVideoDuration;
+                currentVideoStartTime = System.currentTimeMillis();
+                nextVideoReady = false;
+                nextVideoStarted = false;
 
-                // Schedule next transition
-                scheduleNextTransition();
+                backgroundHandler.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        fadingOut.stop();
+
+                        mainHandler.post(new Runnable() {
+                            @Override
+                            public void run() {
+                                long delayUntilPreparation = currentVideoDuration - FADE_DURATION - PREPARE_ADVANCE_TIME;
+
+                                if (delayUntilPreparation > 0) {
+                                    postDelayed(new Runnable() {
+                                        @Override
+                                        public void run() {
+                                            prepareNextVideoAsync();
+                                        }
+                                    }, delayUntilPreparation);
+                                } else {
+                                    prepareNextVideoAsync();
+                                }
+                            }
+                        });
+                    }
+                });
             }
         });
 
         crossFadeAnimator.start();
-        Log.d(TAG, "Cross-fade started");
     }
 
-    private void scheduleNextTransition() {
-        try {
-            int duration = currentLayer.getDuration();
-            int currentPos = currentLayer.getCurrentPosition();
-            int remaining = duration - currentPos;
-            long delay = remaining - FADE_DURATION;
-
-            if (delay > 0) {
-                postDelayed(new Runnable() {
-                    @Override
-                    public void run() {
-                        prepareAndCrossFade();
-                    }
-                }, delay);
-            }
-        } catch (Exception e) {
-            Log.e(TAG, "Error scheduling next transition: " + e.getMessage());
-        }
-    }
-
-    private void fadeIn(final VideoLayer layer) {
-        ValueAnimator animator = ValueAnimator.ofFloat(0f, currentBrightness);
+    private void fadeIn(final VideoLayer layer, final float targetBrightness) {
+        ValueAnimator animator = ValueAnimator.ofFloat(0f, targetBrightness);
         animator.setDuration(FADE_DURATION);
         animator.setInterpolator(new LinearInterpolator());
         animator.addUpdateListener(new ValueAnimator.AnimatorUpdateListener() {
@@ -273,12 +476,11 @@ public class CrossFadeVideoView extends FrameLayout {
             }
         });
         animator.start();
-        Log.d(TAG, "Fading in first video to brightness: " + currentBrightness);
     }
 
     private void fadeOutAndPlayNext() {
         final VideoLayer fadingOut = currentLayer;
-        ValueAnimator animator = ValueAnimator.ofFloat(currentBrightness, 0f);
+        ValueAnimator animator = ValueAnimator.ofFloat(currentVideoBrightness, 0f);
         animator.setDuration(FADE_DURATION);
         animator.setInterpolator(new LinearInterpolator());
         animator.addUpdateListener(new ValueAnimator.AnimatorUpdateListener() {
@@ -290,14 +492,31 @@ public class CrossFadeVideoView extends FrameLayout {
         animator.addListener(new android.animation.AnimatorListenerAdapter() {
             @Override
             public void onAnimationEnd(android.animation.Animator animation) {
-                fadingOut.stop();
-                playNextVideo();
+                backgroundHandler.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        fadingOut.stop();
+                        mainHandler.post(new Runnable() {
+                            @Override
+                            public void run() {
+                                playNextVideo();
+                            }
+                        });
+                    }
+                });
             }
         });
         animator.start();
     }
 
     public void pauseVideo() {
+        if (scheduledCrossFade != null) {
+            removeCallbacks(scheduledCrossFade);
+        }
+        if (scheduledStart != null) {
+            removeCallbacks(scheduledStart);
+        }
+
         if (currentLayer != null) {
             currentLayer.pause();
         }
@@ -309,6 +528,36 @@ public class CrossFadeVideoView extends FrameLayout {
     public void resumeVideo() {
         if (currentLayer != null) {
             currentLayer.resume();
+
+            if (nextVideoReady) {
+                long elapsed = System.currentTimeMillis() - currentVideoStartTime;
+                long remaining = currentVideoDuration - elapsed;
+
+                long timeUntilCrossFade = remaining - FADE_DURATION;
+                long timeUntilStart = timeUntilCrossFade - START_ADVANCE_TIME;
+
+                if (!nextVideoStarted && timeUntilStart > 0) {
+                    scheduledStart = new Runnable() {
+                        @Override
+                        public void run() {
+                            startNextVideoAsync();
+                        }
+                    };
+                    postDelayed(scheduledStart, timeUntilStart);
+                } else if (!nextVideoStarted) {
+                    startNextVideoAsync();
+                }
+
+                if (timeUntilCrossFade > 0) {
+                    scheduledCrossFade = new Runnable() {
+                        @Override
+                        public void run() {
+                            beginCrossFade();
+                        }
+                    };
+                    postDelayed(scheduledCrossFade, timeUntilCrossFade);
+                }
+            }
         }
         if (nextLayer != null && nextLayer.isPlaying()) {
             nextLayer.resume();
@@ -319,16 +568,34 @@ public class CrossFadeVideoView extends FrameLayout {
         if (crossFadeAnimator != null) {
             crossFadeAnimator.cancel();
         }
+        if (scheduledCrossFade != null) {
+            removeCallbacks(scheduledCrossFade);
+        }
+        if (scheduledStart != null) {
+            removeCallbacks(scheduledStart);
+        }
         layer1.cleanup();
         layer2.cleanup();
+
+        if (backgroundThread != null) {
+            backgroundThread.quitSafely();
+            try {
+                backgroundThread.join();
+            } catch (InterruptedException e) {
+                // ignore
+            }
+        }
     }
 
-    // Inner class for individual video layer
+    /**
+     * VideoLayer with background loading support
+     */
     private static class VideoLayer extends TextureView implements TextureView.SurfaceTextureListener {
         private static final String TAG = "VideoLayer";
         private MediaPlayer mediaPlayer;
         private Surface surface;
         private boolean surfaceReady = false;
+        private final Object mediaPlayerLock = new Object();
 
         interface VideoCallback {
             void onPrepared(int duration);
@@ -345,49 +612,40 @@ public class CrossFadeVideoView extends FrameLayout {
             return surfaceReady;
         }
 
+        /**
+         * Standard loadVideo for first video (on main thread)
+         */
         public void loadVideo(String videoPath, final VideoCallback callback) {
-            File file = new File(videoPath);
-            if (!file.exists() || !file.canRead()) {
-                Log.e(TAG, "Cannot access video: " + videoPath);
-                callback.onError();
-                return;
-            }
-
             try {
-                if (mediaPlayer != null) {
-                    mediaPlayer.reset();
-                } else {
-                    mediaPlayer = new MediaPlayer();
-                }
-
-                FileInputStream fis = new FileInputStream(file);
-                try {
-                    mediaPlayer.setDataSource(fis.getFD());
-                } finally {
-                    fis.close();
-                }
-
-                mediaPlayer.setSurface(surface);
-                mediaPlayer.setVolume(0f, 0f);
-
-                mediaPlayer.setOnPreparedListener(new MediaPlayer.OnPreparedListener() {
-                    @Override
-                    public void onPrepared(MediaPlayer mp) {
-                        callback.onPrepared(mp.getDuration());
+                synchronized (mediaPlayerLock) {
+                    if (mediaPlayer != null) {
+                        mediaPlayer.reset();
+                    } else {
+                        mediaPlayer = new MediaPlayer();
                     }
-                });
 
-                mediaPlayer.setOnErrorListener(new MediaPlayer.OnErrorListener() {
-                    @Override
-                    public boolean onError(MediaPlayer mp, int what, int extra) {
-                        Log.e(TAG, "Player error: " + what + ", " + extra);
-                        callback.onError();
-                        return true;
-                    }
-                });
+                    mediaPlayer.setDataSource(videoPath);
+                    mediaPlayer.setSurface(surface);
+                    mediaPlayer.setVolume(0f, 0f);
 
-                mediaPlayer.prepareAsync();
+                    mediaPlayer.setOnPreparedListener(new MediaPlayer.OnPreparedListener() {
+                        @Override
+                        public void onPrepared(MediaPlayer mp) {
+                            callback.onPrepared(mp.getDuration());
+                        }
+                    });
 
+                    mediaPlayer.setOnErrorListener(new MediaPlayer.OnErrorListener() {
+                        @Override
+                        public boolean onError(MediaPlayer mp, int what, int extra) {
+                            Log.e(TAG, "Player error: " + what + ", " + extra);
+                            callback.onError();
+                            return true;
+                        }
+                    });
+
+                    mediaPlayer.prepareAsync();
+                }
             } catch (Exception e) {
                 Log.e(TAG, "Exception loading video: " + e.getMessage());
                 e.printStackTrace();
@@ -395,96 +653,179 @@ public class CrossFadeVideoView extends FrameLayout {
             }
         }
 
+        /**
+         * NEW: Async loadVideo - all blocking operations on background thread
+         */
+        public void loadVideoAsync(final String videoPath, Handler backgroundHandler, final VideoCallback callback) {
+            backgroundHandler.post(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        Log.d(TAG, "Loading video on background thread: " + videoPath);
+
+                        synchronized (mediaPlayerLock) {
+                            // All these blocking operations now on background thread!
+                            if (mediaPlayer != null) {
+                                mediaPlayer.reset();  // 55ms - now on background!
+                            } else {
+                                mediaPlayer = new MediaPlayer();
+                            }
+
+                            mediaPlayer.setDataSource(videoPath);  // 179ms - now on background!
+                            mediaPlayer.setSurface(surface);       // 3ms - now on background!
+                            mediaPlayer.setVolume(0f, 0f);
+
+                            // Prepare listener - will be called on background thread
+                            mediaPlayer.setOnPreparedListener(new MediaPlayer.OnPreparedListener() {
+                                @Override
+                                public void onPrepared(MediaPlayer mp) {
+                                    // This callback happens on background thread
+                                    int duration = mp.getDuration();
+                                    callback.onPrepared(duration);
+                                }
+                            });
+
+                            mediaPlayer.setOnErrorListener(new MediaPlayer.OnErrorListener() {
+                                @Override
+                                public boolean onError(MediaPlayer mp, int what, int extra) {
+                                    Log.e(TAG, "Player error: " + what + ", " + extra);
+                                    callback.onError();
+                                    return true;
+                                }
+                            });
+
+                            mediaPlayer.prepareAsync();  // Still async, but initiated from background
+                        }
+
+                        Log.d(TAG, "Video loading initiated on background thread");
+
+                    } catch (Exception e) {
+                        Log.e(TAG, "Exception loading video async: " + e.getMessage());
+                        e.printStackTrace();
+                        callback.onError();
+                    }
+                }
+            });
+        }
+
         public void start() {
-            if (mediaPlayer != null) {
-                try {
-                    mediaPlayer.start();
-                } catch (Exception e) {
-                    Log.e(TAG, "Error starting: " + e.getMessage());
+            synchronized (mediaPlayerLock) {
+                if (mediaPlayer != null) {
+                    try {
+                        mediaPlayer.start();
+                    } catch (Exception e) {
+                        Log.e(TAG, "Error starting: " + e.getMessage());
+                    }
+                }
+            }
+        }
+
+        public void seekTo(int msec) {
+            synchronized (mediaPlayerLock) {
+                if (mediaPlayer != null) {
+                    try {
+                        mediaPlayer.seekTo(msec);
+                    } catch (Exception e) {
+                        Log.e(TAG, "Error seeking: " + e.getMessage());
+                    }
                 }
             }
         }
 
         public void stop() {
-            if (mediaPlayer != null) {
-                try {
-                    if (mediaPlayer.isPlaying()) {
-                        mediaPlayer.stop();
+            synchronized (mediaPlayerLock) {
+                if (mediaPlayer != null) {
+                    try {
+                        if (mediaPlayer.isPlaying()) {
+                            mediaPlayer.stop();
+                        }
+                    } catch (Exception e) {
+                        Log.e(TAG, "Error stopping: " + e.getMessage());
                     }
-                } catch (Exception e) {
-                    Log.e(TAG, "Error stopping: " + e.getMessage());
                 }
             }
         }
 
         public void pause() {
-            if (mediaPlayer != null) {
-                try {
-                    if (mediaPlayer.isPlaying()) {
-                        mediaPlayer.pause();
+            synchronized (mediaPlayerLock) {
+                if (mediaPlayer != null) {
+                    try {
+                        if (mediaPlayer.isPlaying()) {
+                            mediaPlayer.pause();
+                        }
+                    } catch (Exception e) {
+                        Log.e(TAG, "Error pausing: " + e.getMessage());
                     }
-                } catch (Exception e) {
-                    Log.e(TAG, "Error pausing: " + e.getMessage());
                 }
             }
         }
 
         public void resume() {
-            if (mediaPlayer != null) {
-                try {
-                    if (!mediaPlayer.isPlaying()) {
-                        mediaPlayer.start();
+            synchronized (mediaPlayerLock) {
+                if (mediaPlayer != null) {
+                    try {
+                        if (!mediaPlayer.isPlaying()) {
+                            mediaPlayer.start();
+                        }
+                    } catch (Exception e) {
+                        Log.e(TAG, "Error resuming: " + e.getMessage());
                     }
-                } catch (Exception e) {
-                    Log.e(TAG, "Error resuming: " + e.getMessage());
                 }
             }
         }
 
         public boolean isPlaying() {
-            if (mediaPlayer != null) {
-                try {
-                    return mediaPlayer.isPlaying();
-                } catch (Exception e) {
-                    return false;
+            synchronized (mediaPlayerLock) {
+                if (mediaPlayer != null) {
+                    try {
+                        return mediaPlayer.isPlaying();
+                    } catch (Exception e) {
+                        return false;
+                    }
                 }
+                return false;
             }
-            return false;
         }
 
         public int getDuration() {
-            if (mediaPlayer != null) {
-                try {
-                    return mediaPlayer.getDuration();
-                } catch (Exception e) {
-                    return 0;
+            synchronized (mediaPlayerLock) {
+                if (mediaPlayer != null) {
+                    try {
+                        return mediaPlayer.getDuration();
+                    } catch (Exception e) {
+                        return 0;
+                    }
                 }
+                return 0;
             }
-            return 0;
         }
 
         public int getCurrentPosition() {
-            if (mediaPlayer != null) {
-                try {
-                    return mediaPlayer.getCurrentPosition();
-                } catch (Exception e) {
-                    return 0;
+            synchronized (mediaPlayerLock) {
+                if (mediaPlayer != null) {
+                    try {
+                        return mediaPlayer.getCurrentPosition();
+                    } catch (Exception e) {
+                        return 0;
+                    }
                 }
+                return 0;
             }
-            return 0;
         }
 
         public void cleanup() {
-            if (mediaPlayer != null) {
-                try {
-                    if (mediaPlayer.isPlaying()) {
-                        mediaPlayer.stop();
+            synchronized (mediaPlayerLock) {
+                if (mediaPlayer != null) {
+                    try {
+                        if (mediaPlayer.isPlaying()) {
+                            mediaPlayer.stop();
+                        }
+                        mediaPlayer.release();
+                    } catch (Exception e) {
+                        Log.e(TAG, "Error cleaning up: " + e.getMessage());
                     }
-                    mediaPlayer.release();
-                } catch (Exception e) {
-                    Log.e(TAG, "Error cleaning up: " + e.getMessage());
+                    mediaPlayer = null;
                 }
-                mediaPlayer = null;
             }
         }
 
