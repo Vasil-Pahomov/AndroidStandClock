@@ -100,7 +100,7 @@ public class ClockView extends View {
         textPaintTimeStroke.setTypeface(custom_font);
         textPaintTimeStroke.setColor(isDay ? Color.WHITE : Color.BLACK); // Opposite color for contrast
         textPaintTimeStroke.setStyle(Paint.Style.STROKE);
-        textPaintTimeStroke.setStrokeWidth(8); // Adjust thickness as needed
+        textPaintTimeStroke.setStrokeWidth(10); // Adjust thickness as needed
         textPaintTimeStroke.setAntiAlias(true);
 
         String[] time_str = addLeadingZeros(date_time[4], date_time[5], date_time[6]);
