@@ -18,9 +18,9 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
 
-public class CrossFadeVideoView extends FrameLayout {
+public class CrossFadeVideoView extends FrameLayout implements IDisplayMode {
 
-    private static final String TAG = "CrossFadeVideoView";
+    private static final String TAG = "VideoView";
     private static final int FADE_DURATION = 1000;
     private static final float VIDEO_BRIGHTNESS_DAY = 1.0f;
     private static final float VIDEO_BRIGHTNESS_NIGHT = 0.8f;
@@ -42,7 +42,6 @@ public class CrossFadeVideoView extends FrameLayout {
     private int currentVideoIndex = -1;
     private Random random = new Random();
     private ValueAnimator crossFadeAnimator;
-    private boolean isDay = true;
 
     private float currentVideoBrightness = VIDEO_BRIGHTNESS_DAY;
     private float nextVideoBrightness = VIDEO_BRIGHTNESS_DAY;
@@ -60,6 +59,10 @@ public class CrossFadeVideoView extends FrameLayout {
     private HandlerThread backgroundThread;
     private Handler backgroundHandler;
     private Handler mainHandler;
+
+    // Color background mode (when videos are not displayed)
+    private boolean colorBackgroundMode = false;
+    private int backgroundColor = android.graphics.Color.WHITE;
 
     public CrossFadeVideoView(Context context) {
         super(context);
@@ -112,24 +115,92 @@ public class CrossFadeVideoView extends FrameLayout {
 
         Log.d(TAG, "Playlist set - Day: " + dayVideos.size() + ", Night: " + nightVideos.size());
 
-        postDelayed(new Runnable() {
-            @Override
-            public void run() {
-                if (layer1.isReady() && layer2.isReady()) {
-                    playNextVideo();
-                } else {
-                    postDelayed(this, 100);
+        // Check if we're in the video display period
+        if (isInVideoPeriod()) {
+            // Enable video mode
+            this.colorBackgroundMode = false;
+            setBackgroundColor(android.graphics.Color.TRANSPARENT);
+
+            postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    if (layer1.isReady() && layer2.isReady()) {
+                        playNextVideo();
+                    } else {
+                        postDelayed(this, 100);
+                    }
                 }
-            }
-        }, 100);
+            }, 100);
+        } else {
+            // Outside video period - show color background
+            Log.d(TAG, "Outside video period - using color background mode");
+            setColorBackgroundMode(isDay);
+        }
     }
 
-    public void updateDayNightMode(boolean isDayTime) {
-        if (this.isDay != isDayTime) {
-            Log.d(TAG, "Day/Night mode changed to: " + (isDayTime ? "DAY" : "NIGHT"));
-            this.isDay = isDayTime;
-            currentVideoIndex = -1;
+    private void updateDayNightMode(boolean isDayTime) {
+        Log.d(TAG, "Day/Night mode changed to: " + (isDayTime ? "DAY" : "NIGHT"));
+        this.isDay = isDayTime;
+
+        // Check if we should be in video mode or color background mode
+        if (isInVideoPeriod()) {
+            // In video period - ensure we're playing videos
+            // start playing if we're switching from colorBackground to video OR if no video is playing
+            if (colorBackgroundMode || (!layer1.isPlaying() && !layer2.isPlaying())) {
+                // Switch from color mode to video mode
+                colorBackgroundMode = false;
+                setBackgroundColor(android.graphics.Color.TRANSPARENT);
+
+                // Start playing videos if we have a playlist
+                if (!allVideoPaths.isEmpty()) {
+                    currentVideoIndex = -1;
+                    postDelayed(new Runnable() {
+                        @Override
+                        public void run() {
+                            if (layer1.isReady() && layer2.isReady()) {
+                                playNextVideo();
+                            } else {
+                                postDelayed(this, 100);
+                            }
+                        }
+                    }, 100);
+                }
+            }
+        } else {
+            // Outside video period - ensure we're in color background mode
+            setColorBackgroundMode(isDayTime);
         }
+    }
+
+    /**
+     * Set color background mode - display solid color instead of videos
+     * @param isDayTime true for white background, false for black
+     */
+    public void setColorBackgroundMode(boolean isDayTime) {
+        this.isDay = isDayTime;
+        this.colorBackgroundMode = true;
+        this.backgroundColor = isDayTime ? android.graphics.Color.WHITE : android.graphics.Color.BLACK;
+
+        // Stop any playing videos
+        layer1.stop();
+        layer2.stop();
+
+        // Set layers to transparent
+        layer1.setAlpha(0f);
+        layer2.setAlpha(0f);
+
+        // Set background color
+        setBackgroundColor(backgroundColor);
+
+        Log.d(TAG, "Color background mode enabled: " + (isDayTime ? "WHITE (DAY)" : "BLACK (NIGHT)"));
+    }
+
+    /**
+     * Check if current date is within the video display period
+     */
+    private boolean isInVideoPeriod() {
+        return this.calendarMode == IDisplayMode.CalendarMode.Christmas;
+
     }
 
     protected float calculateVideoBrightness(String videoPath, String filename, boolean isDayTime) {
@@ -172,6 +243,12 @@ public class CrossFadeVideoView extends FrameLayout {
     }
 
     private void playNextVideo() {
+        // Don't play videos in color background mode
+        if (colorBackgroundMode) {
+            Log.d(TAG, "Color background mode active, not playing video");
+            return;
+        }
+
         List<String> playlist = getCurrentPlaylist();
 
         if (playlist == null || playlist.isEmpty()) {
@@ -564,7 +641,7 @@ public class CrossFadeVideoView extends FrameLayout {
         layer2.cleanup();
 
         if (backgroundThread != null) {
-            backgroundThread.quitSafely();
+            backgroundThread.quit();
             try {
                 backgroundThread.join();
             } catch (InterruptedException e) {
@@ -572,6 +649,15 @@ public class CrossFadeVideoView extends FrameLayout {
             }
         }
     }
+
+    protected boolean isDay;
+    protected IDisplayMode.CalendarMode calendarMode;
+
+    public void SetDisplayMode(boolean isDay, IDisplayMode.CalendarMode calendarMode) {
+        this.calendarMode = calendarMode;
+        updateDayNightMode(isDay);
+    }
+
 
     private static class VideoLayer extends TextureView implements TextureView.SurfaceTextureListener {
         private static final String TAG = "VideoLayer";

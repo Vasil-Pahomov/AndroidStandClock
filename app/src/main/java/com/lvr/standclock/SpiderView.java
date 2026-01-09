@@ -7,12 +7,11 @@ import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Matrix;
 import android.graphics.Paint;
-import android.util.AttributeSet;
 import android.view.View;
 
 import java.util.Random;
 
-public class SpiderView extends View {
+public class SpiderView extends View implements IDisplayMode {
 
     private Paint paint = new Paint();
 
@@ -22,7 +21,6 @@ public class SpiderView extends View {
     private float spiderX, spiderY;
     private float spiderVX, spiderVY;
     private float spiderAngle;
-    private boolean spiderEnabled = false;
     private boolean spiderVisible = false;
     private long nextSpiderTime = 0;
     private long lastFrameTime = 0;
@@ -30,6 +28,7 @@ public class SpiderView extends View {
     private final Random random = new Random();
     private Matrix spiderMatrix = new Matrix();
 
+    // Spider period configuration
     public SpiderView(Context context) {
         super(context);
         init(context);
@@ -45,7 +44,7 @@ public class SpiderView extends View {
         init(context);
     }
 
-    private void init(Context context) {
+    protected void init(Context context) {
         // Make this view transparent
         setBackgroundColor(Color.TRANSPARENT);
 
@@ -70,13 +69,12 @@ public class SpiderView extends View {
         spiderFrames[10] = BitmapFactory.decodeResource(context.getResources(), R.drawable.spider5_1m);
     }
 
+    private boolean isInSpiderPeriod() {
+        return this.calendarMode == IDisplayMode.CalendarMode.Halloween;
+    }
+
     public void triggerSpider() {
         if (!spiderVisible) {
-            if (spiderEnabled) {
-                spiderEnabled = false;
-                return;
-            }
-            spiderEnabled = true;
             startSpiderAnimation();
             invalidate();
         }
@@ -95,7 +93,7 @@ public class SpiderView extends View {
         long now = System.currentTimeMillis();
 
         // Spider animation logic
-        if (spiderEnabled && !spiderVisible && now > nextSpiderTime) {
+        if (isInSpiderPeriod() && !spiderVisible && now > nextSpiderTime) {
             startSpiderAnimation();
             invalidate();
         }
@@ -184,5 +182,14 @@ public class SpiderView extends View {
         spiderVY = 30 * (ycen - spiderY) / vlen;
 
         spiderAngle = (float) Math.toDegrees(Math.atan2(spiderVY, spiderVX)) + 90f;
+    }
+
+    protected boolean isDay;
+    protected IDisplayMode.CalendarMode calendarMode;
+
+    public void SetDisplayMode(boolean isDay, CalendarMode calendarMode) {
+        this.isDay = isDay;
+        this.calendarMode = calendarMode;
+        invalidate();
     }
 }

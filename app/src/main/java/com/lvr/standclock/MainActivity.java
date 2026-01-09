@@ -17,6 +17,7 @@ import android.widget.FrameLayout;
 
 import java.io.File;
 import java.util.ArrayList;
+import java.util.Calendar;
 import java.util.List;
 
 public class MainActivity extends Activity {
@@ -29,6 +30,14 @@ public class MainActivity extends Activity {
     private static final String TAG = "MainActivity";
     private static final String VIDEO_FOLDER = "Movies";
     private CrossFadeVideoView videoView;
+
+    // Sunrise/Sunset calculation instance
+    private SunriseSunsetCalculation sunCalc;
+
+    // Periodic update handler
+    private android.os.Handler updateHandler;
+    private Runnable updateRunnable;
+    private static final long UPDATE_INTERVAL = 60000; // Check every minute
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -73,9 +82,23 @@ public class MainActivity extends Activity {
                         }
                     });
         }
-// Create a FrameLayout to hold both views
-        FrameLayout container = new FrameLayout(this);
 
+        // Initialize SunriseSunsetCalculation
+        sunCalc = new SunriseSunsetCalculation(19.457216, 51.759445);
+
+        // Initialize periodic update handler
+        updateHandler = new android.os.Handler();
+        updateRunnable = new Runnable() {
+            @Override
+            public void run() {
+                updateDayNightMode();
+                // Schedule next update
+                updateHandler.postDelayed(this, UPDATE_INTERVAL);
+            }
+        };
+
+        // Create a FrameLayout to hold both views
+        FrameLayout container = new FrameLayout(this);
 
         // Create and add video background view (bottom layer)
         videoView = new CrossFadeVideoView(this);
@@ -85,16 +108,13 @@ public class MainActivity extends Activity {
         clockView = new ClockView(this);
         container.addView(clockView);
 
-        //todo: unbind it - views should be independent on each other
-        clockView.setVideoView(videoView);
-
         //Spider view
         spiderView = new SpiderView(this);
         container.addView(spiderView);
 
         setContentView(container);
 
-// Load video from external storage
+        // Always load video files - CrossFadeVideoView will decide whether to play them
         loadVideo();
 
         batteryReceiver = new BatteryStatusReceiver();
@@ -105,12 +125,71 @@ public class MainActivity extends Activity {
         filter.addAction(Intent.ACTION_POWER_DISCONNECTED);
         registerReceiver(batteryReceiver, filter);
 
+        // Update day/night mode
+        updateDayNightMode();
+
+        // Start periodic updates
+        updateHandler.postDelayed(updateRunnable, UPDATE_INTERVAL);
     }
 
+    /**
+     * Calculate if it's currently daytime
+     */
+    private boolean isDayTime() {
+        Calendar calendar = Calendar.getInstance();
+        int year = calendar.get(Calendar.YEAR);
+        int month = calendar.get(Calendar.MONTH);
+        int day = calendar.get(Calendar.DAY_OF_MONTH);
+
+        SunriseSunsetCalculation.DayResult sun = sunCalc.calculateOfficialForDate(day, month, year);
+        return calendar.getTime().after(sun.getOfficialSunrise()) &&
+                calendar.getTime().before(sun.getOfficialSunset());
+    }
+
+    /**
+     * Update day/night mode for all views
+     */
+    private void updateDayNightMode() {
+        boolean isDay = isDayTime();
+        IDisplayMode.CalendarMode calendarMode = IDisplayMode.CalendarMode.Neutral;
+
+        Calendar now = Calendar.getInstance();
+        int currentMonth = now.get(Calendar.MONTH);
+        int currentDay = now.get(Calendar.DAY_OF_MONTH);
+
+        if ( (currentMonth == Calendar.OCTOBER && currentDay >= 20) ||
+                (currentMonth == Calendar.NOVEMBER && currentDay <= 2) )
+            calendarMode = IDisplayMode.CalendarMode.Halloween;
+
+        if  ( (currentMonth == Calendar.DECEMBER && currentDay >= 20) ||
+                (currentMonth == Calendar.JANUARY && currentDay <= 10) )
+            calendarMode = IDisplayMode.CalendarMode.Christmas;
+
+
+        // Update clock view
+        if (clockView != null) {
+            clockView.SetDisplayMode(isDay, calendarMode);
+        }
+
+        // Update video view
+        if (videoView != null) {
+            videoView.SetDisplayMode(isDay, calendarMode);
+        }
+
+        if (spiderView != null) {
+            spiderView.SetDisplayMode(isDay, calendarMode);
+        }
+    }
 
     @Override
     protected void onDestroy() {
         super.onDestroy();
+
+        // Stop periodic updates
+        if (updateHandler != null && updateRunnable != null) {
+            updateHandler.removeCallbacks(updateRunnable);
+        }
+
         if (videoView != null) {
             videoView.cleanup();
         }
@@ -149,6 +228,9 @@ public class MainActivity extends Activity {
                 clockView.postInvalidate();
             }
         }
+
+        // Update day/night mode on battery events
+        updateDayNightMode();
     }
 
     private void loadVideo() {
@@ -197,9 +279,16 @@ public class MainActivity extends Activity {
 
         Log.w(TAG, "No video files found in: " + VIDEO_FOLDER);
     }
+
     @Override
     protected void onPause() {
         super.onPause();
+
+        // Pause periodic updates
+        if (updateHandler != null && updateRunnable != null) {
+            updateHandler.removeCallbacks(updateRunnable);
+        }
+
         if (videoView != null) {
             videoView.pauseVideo();
         }
@@ -210,6 +299,13 @@ public class MainActivity extends Activity {
         super.onResume();
         if (videoView != null) {
             videoView.resumeVideo();
+        }
+        // Update day/night mode when resuming
+        updateDayNightMode();
+
+        // Resume periodic updates
+        if (updateHandler != null && updateRunnable != null) {
+            updateHandler.postDelayed(updateRunnable, UPDATE_INTERVAL);
         }
     }
 

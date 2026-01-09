@@ -14,7 +14,7 @@ import android.view.View;
 import java.util.Calendar;
 import java.util.Locale;
 
-public class ClockView extends View {
+public class ClockView extends View implements IDisplayMode {
 
     private Typeface custom_font;
     private TextPaint textPaintTime = new TextPaint();
@@ -25,8 +25,6 @@ public class ClockView extends View {
     private Rect bounds = new Rect(), container = new Rect();
 
     private int batteryLevel;
-    private SunriseSunsetCalculation sunCalc = new SunriseSunsetCalculation(19.457216, 51.759445);
-    private CrossFadeVideoView videoView;
 
     public ClockView(Context context) {
         super(context);
@@ -43,7 +41,7 @@ public class ClockView extends View {
         init(context);
     }
 
-    private void init(Context context) {
+    protected void init(Context context) {
         // Make this view transparent so video shows through
         setBackgroundColor(Color.TRANSPARENT);
 
@@ -54,10 +52,6 @@ public class ClockView extends View {
     public void setBatteryLevel(int level) {
         this.batteryLevel = level;
         invalidate();
-    }
-
-    public void setVideoView(CrossFadeVideoView videoView) {
-        this.videoView = videoView;
     }
 
     @Override
@@ -75,16 +69,7 @@ public class ClockView extends View {
         String day_of_week = getDayOfWeek(date_time[3]);
         Log.d("TIME", Calendar.getInstance().getTime().toString());
 
-        //TODO: don't calculate times on every update - it's better to do it once per day
-        SunriseSunsetCalculation.DayResult sun = sunCalc.calculateOfficialForDate(date_time[2], date_time[1], date_time[0]);
-        boolean isDay = Calendar.getInstance().getTime().after(sun.getOfficialSunrise()) &&
-                Calendar.getInstance().getTime().before(sun.getOfficialSunset());
-
         int frontColor = isDay ? Color.BLACK : Color.WHITE;
-
-        if (videoView != null) {
-            videoView.updateDayNightMode(isDay);
-        }
 
         // Get screen size & set widths, heights, others
         int x = getWidth();
@@ -96,26 +81,31 @@ public class ClockView extends View {
         textPaintTime.setColor(frontColor);
         textPaintTime.setStyle(Paint.Style.FILL);
 
-        // Setup stroke (outline)
-        textPaintTimeStroke.setTypeface(custom_font);
-        textPaintTimeStroke.setColor(isDay ? Color.WHITE : Color.BLACK); // Opposite color for contrast
-        textPaintTimeStroke.setStyle(Paint.Style.STROKE);
-        textPaintTimeStroke.setStrokeWidth(10); // Adjust thickness as needed
-        textPaintTimeStroke.setAntiAlias(true);
+
 
         String[] time_str = addLeadingZeros(date_time[4], date_time[5], date_time[6]);
         String middle = String.valueOf(time_str[0] + ":" + time_str[1]);
         container.set(0, 0, x, y);
         float fontSize = calculateFontSize(textPaintTime, bounds, container, middle);
-        textPaintTime.setTextSize(fontSize * 0.98F);
         textPaintTimeStroke.setTextSize(fontSize * 0.98F);
 
         int x_pos = (x - bounds.width()) / 2;
         int y_pos = center_y + bounds.height() / 2;
 
+        if (this.calendarMode == CalendarMode.Christmas) {
+            // Setup stroke (outline)
+            textPaintTimeStroke.setTypeface(custom_font);
+            textPaintTimeStroke.setColor(this.isDay ? Color.WHITE : Color.BLACK); // Opposite color for contrast
+            textPaintTimeStroke.setStyle(Paint.Style.STROKE);
+            textPaintTimeStroke.setStrokeWidth(10); // Adjust thickness as needed
+            textPaintTimeStroke.setAntiAlias(true);
+            textPaintTime.setTextSize(fontSize * 0.98F);
+            canvas.drawText(middle, x_pos, y_pos, textPaintTimeStroke);
+        }
+
         // Draw outline first, then fill on top
-        canvas.drawText(middle, x_pos, y_pos, textPaintTimeStroke);
         canvas.drawText(middle, x_pos, y_pos, textPaintTime);
+
 
         if (batteryLevel > 0) {
             textPaintInfo.setTextSize(y / 16F);
@@ -205,4 +195,14 @@ public class ClockView extends View {
         }
         return null;
     }
+
+    protected boolean isDay;
+    protected IDisplayMode.CalendarMode calendarMode;
+
+    public void SetDisplayMode(boolean isDay, CalendarMode calendarMode) {
+        this.isDay = isDay;
+        this.calendarMode = calendarMode;
+        invalidate();
+    }
+
 }
